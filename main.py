@@ -7,6 +7,7 @@ import pandas as pd
 from typing import Callable, Tuple, List
 import time
 import sys
+from difflib import SequenceMatcher
 
 def get_embedding(client: OpenAI, model: str, dimensions: int, word: str) -> Tuple[str, List[float], float, int]:
     """Generate an embedding using OpenAI's API."""
@@ -52,18 +53,21 @@ def init_db(db_path: str, dimensions: int) -> sqlite3.Connection:
 
 def find_similar_words(db: sqlite3.Connection, 
                       query_word: str, 
-                      embedding_fn: Callable[[str], Tuple[str, List[float]]],
+                      client: OpenAI,
+                      model: str,
+                      dimensions: int,
                       limit: int = 10) -> List[Tuple[str, float]]:
     """Find similar words to the query word using vector similarity."""
     # Generate embedding for query word
-    _, query_embedding = embedding_fn(query_word)
+    _, query_embedding, _, _ = get_embedding(client, model, dimensions, query_word)
     
     # Find similar words
     similar_words = db.execute("""
-    SELECT 
-        w.word,
-        e.distance
-    FROM (
+        SELECT 
+            w.id,
+            w.word,
+            e.distance
+        FROM (
         SELECT 
             rowid,
             distance
@@ -91,14 +95,25 @@ def store_embeddings(db: sqlite3.Connection,
                   (i, embedding_json))
     db.commit()
 
-def query_word(db: sqlite3.Connection, query_word: str, limit: int = 10):
+def query_word(db: sqlite3.Connection, query_word: str, client: OpenAI, model: str, dimensions: int, limit: int = 10):
     """Query the database for similar words and print results."""
-    results = find_similar_words(db, query_word, get_embedding, limit)
+    results = find_similar_words(db, query_word, client, model, dimensions, limit)
+    
+    # Load movie details from CSV
+    df = pd.read_csv("./tmdb_5000_movies.csv")
     
     print(f"\nProximity search results for '{query_word}':")
-    for word, distance in results:
+    for id, word, distance in results:
+        # Get movie details from CSV (subtract 1 from ID since we indexed from 1)
+        movie = df.iloc[id - 1]
+        title = movie['title']
+        release_date = movie['release_date']
+        vote_average = movie['vote_average']
+        
         similarity = 1 / (1 + distance)  # Convert distance to similarity score
-        print(f"{word}:\t{similarity:.4f} | {distance:.4f}")
+        print(f"\n{title} ({release_date}) - Rating: {vote_average}/10")
+        print(f"Overview: {word[:200]}...")
+        print(f"Similarity: {similarity:.4f} | Distance: {distance:.4f}")
 
 def process_movie_data(db: sqlite3.Connection, csv_path: str, client: OpenAI, model: str, dimensions: int, limit: int = 100):
     """Read movie data from CSV and create embeddings for movie overviews."""
@@ -154,31 +169,65 @@ def process_movie_data(db: sqlite3.Connection, csv_path: str, client: OpenAI, mo
     db.commit()
     print(f"Finished processing movies! Statistics saved to {log_file}")
 
+def fuzzy_search_movies(query: str, limit: int = 10):
+    """Search movies using fuzzy string matching on title and overview."""
+    df = pd.read_csv("./tmdb_5000_movies.csv")
+    
+    # Calculate similarity scores for both title and overview
+    def calculate_similarity(row):
+        title_sim = SequenceMatcher(None, query.lower(), str(row['title']).lower()).ratio()
+        overview_sim = SequenceMatcher(None, query.lower(), str(row['overview']).lower()).ratio()
+        # Weight title matches more heavily than overview matches
+        return (title_sim * 0.6) + (overview_sim * 0.4)
+    
+    # Add similarity scores
+    df['similarity'] = df.apply(calculate_similarity, axis=1)
+    
+    # Sort by similarity and get top results
+    results = df.nlargest(limit, 'similarity')
+    
+    print(f"\nFuzzy search results for '{query}':")
+    for _, movie in results.iterrows():
+        print(f"\n{movie['title']} ({movie['release_date']}) - Rating: {movie['vote_average']}/10")
+        print(f"Overview: {str(movie['overview'])[:200]}...")
+        print(f"Similarity Score: {movie['similarity']:.4f}")
+        print("-" * 80)
+
 if __name__ == "__main__":
     import sys
     
     model = "text-embedding-3-large"
-    dimensions = 3072
-    
-    client = OpenAI()
-    db = init_db(f"{model}-{dimensions}.db", dimensions)
+    dimensions = 1536
 
     if len(sys.argv) < 2:
         print("Usage:")
         print("  Query mode: python main.py <query_text>")
+        print("  Fuzzy Search: python main.py search-fuzzy <query_text>")
         print("  Populate DB: python main.py populate-db [limit]")
         sys.exit(1)
 
-    if sys.argv[1] == "populate-db":
+    if sys.argv[1] == "search-fuzzy":
+        if len(sys.argv) < 3:
+            print("Please provide a search query")
+            sys.exit(1)
+        query = " ".join(sys.argv[2:])
+        fuzzy_search_movies(query)
+    elif sys.argv[1] == "populate-db":
+        client = OpenAI()
+        db = init_db(f"{model}-{dimensions}.db", dimensions)
         limit = int(sys.argv[2]) if len(sys.argv) > 2 else 100
         process_movie_data(db, "./tmdb_5000_movies.csv", client, model, dimensions, limit=limit)
+        db.close()
     else:
+        client = OpenAI()
+        db = init_db(f"{model}-{dimensions}.db", dimensions)
         # Join all remaining arguments as the query text
         query = " ".join(sys.argv[1:])
-        query_word(db, query, limit=5)
-    
-    db.close()
+        query_word(db, query, client, model, dimensions, limit=10)
+        db.close()
 
 # headers
 # budget,genres,homepage,id,keywords,original_language,original_title,overview,popularity,production_companies,production_countries,release_date,revenue,runtime,spoken_languages,status,tagline,title,vote_average,vote_coun
+
+
 
