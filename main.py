@@ -1,7 +1,6 @@
 import sqlite3
 import sqlite_vec
 from openai import OpenAI
-import os
 import json
 import pandas as pd
 from typing import Callable, Tuple, List
@@ -196,7 +195,7 @@ def fuzzy_search_movies(query: str, limit: int = 10):
 if __name__ == "__main__":
     import sys
     
-    model = "text-embedding-3-large"
+    model = "text-embedding-3-small"
     dimensions = 1536
 
     if len(sys.argv) < 2:
@@ -225,9 +224,3 @@ if __name__ == "__main__":
         query = " ".join(sys.argv[1:])
         query_word(db, query, client, model, dimensions, limit=10)
         db.close()
-
-# headers
-# budget,genres,homepage,id,keywords,original_language,original_title,overview,popularity,production_companies,production_countries,release_date,revenue,runtime,spoken_languages,status,tagline,title,vote_average,vote_coun
-
-
-
